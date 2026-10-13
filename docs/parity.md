@@ -1,19 +1,21 @@
-# lmcpp parity boundary (slice 1)
+# lmcpp parity boundary (slice 2)
 
-| Area | Slice 1 | lmrust / later |
+| Area | Implemented | Deferred |
 |---|---|---|
-| Schema publish | Deterministic cli.schema.v1 for scalar params, explicit read/write | Parse/validate published schemas and optional metadata later |
-| Inputs | Flags and inline JSON, direct params or `{op,params}` | input-file, GraphQL, aliases, booleans false/repeat/positionals later |
-| Validation | Unknown, duplicate, missing, scalar type, enum issues | Full lmapi coercion and conformance vectors later |
-| Runner | `--schema`, dispatch, stdout JSON, protocol envelope/exits, exception boundary | Help/list, readonly/dryrun/confirm and environment policy floors later |
-| Result files | Deferred | lmrust adapter deferred by requested scope |
-| CLI bridge / client | Deferred | CLI11 bridge, GraphQL, client APIs out of scope |
+| Schema | Deterministic publish; basic published schema validation | Full metadata and warning parity |
+| Inputs | Flags, inline/file JSON, direct params or `{op,params}` | GraphQL and remaining argv edge parity |
+| Validation | Shared validator for supported scalar, object, array, and JSON params | Full coercion/suggestion parity outside covered vectors |
+| Runner | `--schema`, dispatch, JSON envelopes/exits, exceptions; readonly/dryrun/confirm | Help/list and broader server compatibility |
+| Results | RAII temp path; JSON/text parsing and 16 MiB cap | CSV/auto formats and CLI bridge integration |
+| Client / bridge | Deferred | CLI11 bridge, GraphQL client, encode and interpret APIs |
 
-Policy enforcement (readonly/dryrun) is intentionally a TODO for slice 2. The write toy.note
-operation is included as a fixture; this slice does not claim policy-floor conformance.
+`TOY_READONLY` and `TOY_DRYRUN` accept `1`, `true`, `yes`, or `on`, case-insensitively.
+Dry-run validates before returning a synthetic plan and never invokes the handler. `--confirm`
+and `--i-understand` satisfy dangerous-operation confirmation; lmrust has no confirm env floor.
 Required parameters publish as `occurs: "1"` and optional parameters as `"?"`; lmapi's
 schema validator rejects a separate `required` property.
 
-The lmapi JSON vector groups are deferred to slice 2: this first runner does not expose the
-lower-level published-schema parser/validator interfaces those vectors exercise, and adapting
-only selected cases into a second test harness would not be a meaningful conformance run.
+CTest consumes every validate, argv, and publish vector. It skips only GraphQL validate cases
+because this SDK publishes flags and JSON only. Client-only encode and interpret groups are
+inapplicable and not run. Number results retain nlohmann's `5.0` formatting; serde_json also
+serializes an f64 value of 5.0 as `5.0`.
