@@ -14,7 +14,7 @@ build/bin/toy add --a 2 --b=3
 build/bin/toy scale --input-json '{"value":5,"factor":4}'
 ```
 
-Flags accept `--name value` or `--name=value`; booleans can be bare or negated with `--no-name`. The runner supports aliases, kebab-case names, positionals after `--`, and `--input-file path.json`. JSON can be direct params or an `{ "op": "add", "params": { ... } }` envelope. `--schema` does not initialize operation handlers.
+Flags accept `--name value` or `--name=value`; booleans can be bare or negated with `--no-name`. The runner supports aliases, kebab-case names, positionals after `--`, and `--input-file path.json`. JSON is an `{ "op": "add", "params": { ... } }` envelope only when `op` is a string and all top-level keys are `op` and `params`; otherwise it is a direct parameter object (including objects with a parameter named `op`). `--schema` does not initialize operation handlers.
 
 Success prints raw result JSON and exits 0. Errors print `{"success":false,"error":{"code":"...","message":"...","data":{...}}}` to stdout; diagnostics go to stderr. Protocol exit codes include validation 2, parse 3, not found 4, conflict 5, forbidden/readonly 6, timeout 7, unavailable 8, missing confirmation 9, and unsupported product version 10. Internal and command failures exit 1.
 

@@ -30,7 +30,27 @@ int main(){auto s=spec();auto schema=publish_schema(s);assert(schema==publish_sc
   std::string deep(50000,'[');deep+="0";deep+=std::string(50000,']');out.str("");assert(run_cli_io(s,{"add","--input-json",deep},out,err)==2);assert(Json::parse(out.str())["success"]==false);
   out.str("");assert(run_cli_io(s,{"--input-json","{\"op\":\"add\",\"params\":{\"a\":2,\"b\":3}}"},out,err)==0);assert(Json::parse(out.str())["value"]==5);
   out.str("");assert(run_cli_io(s,{"--schema","--readonly"},out,err)==0);assert(Json::parse(out.str())["schema"]=="cli.schema.v1");out.str("");assert(run_cli_io(s,{"--list"},out,err)==0);assert(Json::parse(out.str()).is_array());out.str("");assert(run_cli_io(s,{"--explain","add"},out,err)==0);assert(Json::parse(out.str())["name"]=="add");
-  out.str("");assert(run_cli_io(s,{"add","--input-json","{\"op\":\"add\",\"params\":{\"a\":2,\"b\":3},\"extra\":true}"},out,err)==2);assert(Json::parse(out.str())["error"]["data"]["issues"][0]["code"]=="DOCUMENT_PARSE");
+  out.str("");assert(run_cli_io(s,{"add","--input-json","{\"op\":\"add\",\"params\":{\"a\":2,\"b\":3},\"extra\":true}"},out,err)==2);assert(Json::parse(out.str())["error"]["data"]["issues"][0]["code"]=="UNKNOWN_PARAM");
   std::string fifo="/tmp/lmcpp-result-fifo";::unlink(fifo.c_str());assert(::mkfifo(fifo.c_str(),0600)==0);alarm(3);bool fifo_rejected=false;try{read_result_file(fifo,"text");}catch(const Error&){fifo_rejected=true;}alarm(0);assert(fifo_rejected);out.str("");alarm(3);assert(run_cli_io(s,{"add","--input-file",fifo},out,err)==3);alarm(0);::unlink(fifo.c_str());alarm(3);bool zero_rejected=false;try{read_result_file("/dev/zero","text");}catch(const Error&){zero_rejected=true;}alarm(0);assert(zero_rejected);out.str("");alarm(3);assert(run_cli_io(s,{"add","--input-file","/dev/zero"},out,err)==3);alarm(0);
   std::string huge_input="/tmp/lmcpp-input-too-large";{std::ofstream f(huge_input,std::ios::binary);f.seekp(16*1024*1024);f.put('x');}out.str("");assert(run_cli_io(s,{"add","--input-file",huge_input},out,err)==3);::unlink(huge_input.c_str());
+  // Slice 8 regressions: argv JSON must have the same depth cap as documents.
+  std::string deep_argv(60000,'[');deep_argv+="0";deep_argv+=std::string(60000,']');
+  Operation jsonflag{"jsonflag",Access::Read,"","object",{Param{"value",Type::Json,false,nullptr,{},"","?"}}};
+  bool deep_flag_rejected=false;try{parse_argv(jsonflag,{"--value",deep_argv});}catch(const Error&e){deep_flag_rejected=e.code==ErrorCode::ValidationError;}assert(deep_flag_rejected);
+  Operation jsonpos{"jsonpos",Access::Read,"","object",{Param{"value",Type::Json,false,nullptr,{},"","?",true}}};
+  bool deep_pos_rejected=false;try{parse_argv(jsonpos,{deep_argv});}catch(const Error&e){deep_pos_rejected=e.code==ErrorCode::ValidationError;}assert(deep_pos_rejected);
+  std::string deep_object;for(int i=0;i<60000;++i)deep_object+="{\"x\":";deep_object+="0";deep_object+=std::string(60000,'}');
+  for(Type jt:{Type::Object,Type::Array}){Operation jf{"deepflag",Access::Read,"","object",{Param{"value",jt,false,nullptr,{},"","?"}}};Operation jp{"deeppos",Access::Read,"","object",{Param{"value",jt,false,nullptr,{},"","?",true,false,false,{},jt}}};std::string payload=jt==Type::Object?deep_object:deep_argv;bool rf=false,rp=false;try{parse_argv(jf,{"--value",payload});}catch(const Error&e){rf=e.code==ErrorCode::ValidationError;}try{parse_argv(jp,{payload});}catch(const Error&e){rp=e.code==ErrorCode::ValidationError;}assert(rf&&rp);}
+  Operation positional{"pos",Access::Read,"","object",{Param{"n",Type::Number,true,nullptr,{},"","1",true}}};
+  auto negpos=parse_argv(positional,{"-5"});assert(negpos["params"]["n"]==-5);
+  Operation negval{"negval",Access::Read,"","object",{Param{"n",Type::Number,true}}};
+  assert(parse_argv(negval,{"--n","-5"})["params"]["n"]==-5);
+  Operation shortalias{"shortalias",Access::Read,"","object",{Param{"value",Type::Number,true,nullptr,{},"","1",false,false,false,{"N"}}}};
+  assert(parse_argv(shortalias,{"-N","7"})["params"]["value"]==7);
+  Operation paramop{"paramop",Access::Read,"","object",{Param{"a",Type::Number,true},Param{"b",Type::Number,true},Param{"op",Type::String,true}}};
+  paramop.handler=[](const Params&p){return p;};s.operations.push_back(paramop);
+  out.str("");assert(run_cli_io(s,{"paramop","--input-json",R"({"a":1,"b":2,"op":"add"})"},out,err)==0);
+  assert(Json::parse(out.str())["op"]=="add");
+  out.str("");assert(run_cli_io(s,{"add","--input-json","{}","--input-json","{}"},out,err)==2);
+  assert(Json::parse(out.str())["error"]["data"]["issues"][0]["code"]=="DUPLICATE_FLAG");
 }
