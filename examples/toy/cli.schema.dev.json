@@ -1,0 +1,66 @@
+{
+  "schema": "cli.schema.v1",
+  "tool": "toy",
+  "version": "0.1.0",
+  "inputs": [
+    "flags",
+    "json"
+  ],
+  "globals": [],
+  "operations": [
+    {
+      "name": "add",
+      "access": "read",
+      "returns": "object",
+      "description": "Add two numbers",
+      "params": [
+        {
+          "name": "a",
+          "type": "number",
+          "occurs": "1"
+        },
+        {
+          "name": "b",
+          "type": "number",
+          "occurs": "1"
+        }
+      ]
+    },
+    {
+      "name": "scale",
+      "access": "read",
+      "returns": "object",
+      "description": "Scale a number",
+      "params": [
+        {
+          "name": "value",
+          "type": "number",
+          "occurs": "1"
+        },
+        {
+          "name": "factor",
+          "type": "number",
+          "occurs": "1"
+        }
+      ]
+    },
+    {
+      "name": "note",
+      "access": "write",
+      "returns": "object",
+      "description": "Append a note to a file",
+      "params": [
+        {
+          "name": "path",
+          "type": "string",
+          "occurs": "1"
+        },
+        {
+          "name": "text",
+          "type": "string",
+          "occurs": "1"
+        }
+      ]
+    }
+  ]
+}

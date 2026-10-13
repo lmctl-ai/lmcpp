@@ -1,0 +1,11 @@
+import "./cli.schema.dev.json" as toy;
+a = toy.add({a:2, b:3});
+if (a.status == "error") { println(a.error.message); exit(1); }
+v = 5;
+if (a.status == "ok") { v = a.result.value; }
+b = toy.scale({value:v, factor:4});
+if (b.status == "error") { println(b.error.message); exit(1); }
+if (b.status == "ok") {
+  if (b.result.value != 20) { exit(1); }
+  println(b.result.value);
+}
