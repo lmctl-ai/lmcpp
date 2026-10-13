@@ -2,9 +2,16 @@
 
 All notable changes to lmcpp are documented here.
 
-## [0.1.0] - 2026-10-13
+## [0.1.0] - Unreleased
 
 ### Added
 
-- C++17 server SDK for `cli.schema.v1` schema publishing, flags/JSON input validation, policy floors, result files, and error envelopes.
+- C++17 server SDK for `cli.schema.v1`, flags and JSON validation, policy floors, result files, and error envelopes.
 - Toy native tool, lmapi server conformance tests, installable CMake package, and consumer smoke test.
+
+### Fixed
+
+- Route runtime calls through the tested argv parser and preserve raw string values.
+- Bound JSON depth and file reads; safely serialize invalid UTF-8 failures.
+- Publish protocol-compatible parameter types and metadata, and derive requiredness from `occurs`.
+- Add runtime argv fixture coverage and minimal server discovery commands.
