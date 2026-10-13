@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  LMAPI_REF: e1ccceab82680437b81e80fd17f11cf7d17ecfd4
+
+jobs:
+  build-test:
+    name: Build and test (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - name: Checkout lmcpp
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: lmcpp
+      - name: Checkout pinned lmapi conformance vectors
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: lmctl-ai/lmapi
+          ref: ${{ env.LMAPI_REF }}
+          path: lmapi
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build nlohmann-json3-dev g++ clang
+      - name: Configure
+        working-directory: lmcpp
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DLMCPP_REQUIRE_CONFORMANCE=ON -DLMAPI_DIR=../lmapi
+      - name: Build
+        working-directory: lmcpp
+        run: cmake --build build --parallel 2
+      - name: Test
+        working-directory: lmcpp
+        run: ctest --test-dir build --output-on-failure
+      - name: Install and find_package consumer smoke test
+        working-directory: lmcpp
+        run: ./scripts/test-consumer.sh build

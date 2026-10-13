@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.22)
+project(lmcpp_consumer LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(lmcpp CONFIG REQUIRED)
+add_executable(lmcpp_consumer main.cpp)
+target_link_libraries(lmcpp_consumer PRIVATE lmcpp::core)
