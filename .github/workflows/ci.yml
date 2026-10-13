@@ -48,7 +48,7 @@ jobs:
         run: cmake --build build --parallel 2
       - name: Test
         working-directory: lmcpp
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -V --output-on-failure
       - name: Install and find_package consumer smoke test
         working-directory: lmcpp
         run: ./scripts/test-consumer.sh build
