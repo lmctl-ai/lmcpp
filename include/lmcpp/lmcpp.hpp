@@ -3,6 +3,7 @@
 #include <functional>
 #include <iosfwd>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lmcpp {
@@ -11,7 +12,26 @@ using Params = Json;
 enum class Type { String, Number, Integer, Boolean, Object, Array, Json };
 enum class Access { Read, Write };
 enum class ErrorCode { InvalidRequest, ValidationError, ParseError, NotFound, Conflict, Forbidden, ReadOnlyViolation, Timeout, ServiceUnavailable, MissingConfirmation, UnsupportedProductVersion, InternalError, CommandFailed };
-struct Param { std::string name; Type type; bool required=true; Json default_value=nullptr; std::vector<Json> enum_values; std::string description; std::string occurs="1"; bool positional=false, cli_only=false, doc_only=false; std::vector<std::string> aliases; Type item_type=Type::String; };
+struct Param {
+  std::string name;
+  Type type=Type::String;
+  Json default_value=nullptr;
+  std::vector<Json> enum_values;
+  std::string description;
+  std::string occurs="1";
+  bool positional=false, cli_only=false, doc_only=false;
+  std::vector<std::string> aliases;
+  Type item_type=Type::String;
+  Param()=default;
+  Param(std::string n, Type t, bool required=true, Json def=nullptr,
+        std::vector<Json> values={}, std::string desc={}, std::string cardinality="",
+        bool pos=false, bool cli=false, bool doc=false,
+        std::vector<std::string> names={}, Type item=Type::String)
+      : name(std::move(n)), type(t), default_value(std::move(def)),
+        enum_values(std::move(values)), description(std::move(desc)),
+        occurs(cardinality.empty() ? (required ? "1" : "?") : std::move(cardinality)),
+        positional(pos), cli_only(cli), doc_only(doc), aliases(std::move(names)), item_type(item) {}
+};
 struct Context;
 struct Operation { std::string name; Access access=Access::Read; std::string description; std::string returns="object"; std::vector<Param> params; std::function<Json(const Params&)> handler; std::function<Json(const Params&,Context&)> context_handler; bool dangerous=false; };
 struct CliSpec { std::string tool, version; std::vector<Operation> operations; };
