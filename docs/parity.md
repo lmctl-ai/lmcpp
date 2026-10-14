@@ -17,3 +17,5 @@ Document input is treated as an `{op,params}` envelope only when `op` is a strin
 `TOY_READONLY` and `TOY_DRYRUN` accept `1`, `true`, `yes`, and `on`, case-insensitively. The readonly floor blocks writes. Dry-run validates before returning a plan and does not invoke handlers. `--confirm` and `--i-understand` satisfy dangerous-operation confirmation; there is no confirm environment floor.
 
 `Type::Integer` remains an internal validation type, but publishes as `number` because lmts and the protocol do not accept `integer`. As a result, a remote schema consumer cannot see the server's integer-only restriction. Number JSON output preserves `5.0`, matching serde_json for an f64 value of 5.0.
+
+- Input documents: JSON input files are bounded at 16 MiB and oversized inputs report `INPUT_TOO_LARGE`; oversized result files report `OUTPUT_TOO_LARGE`.

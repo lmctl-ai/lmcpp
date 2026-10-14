@@ -1,3 +1,7 @@
+## Unreleased
+
+- Report oversized JSON input files as `INPUT_TOO_LARGE`, distinct from oversized result output.
+
 # Changelog
 
 All notable changes to lmcpp are documented here.
