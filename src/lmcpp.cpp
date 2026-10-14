@@ -129,11 +129,14 @@ ChildResult run_child(const std::vector<std::string>& argv,
   auto reap=[&](){if(child_done)return;pid_t waited=waitpid(pid,&status,WNOHANG);if(waited==pid){child_done=true;have_status=true;}else if(waited<0&&errno!=EINTR){child_done=true;result.status_unknown=true;result.status_error=strerror(errno);}};
   auto read_exec_status=[&](){if(!status_open)return;int e=0;ssize_t n=read(status_pipe[0],&e,sizeof(e));if(n==static_cast<ssize_t>(sizeof(e))){result.exec_failed=true;result.exec_errno=e;result.exec_error=strerror(e);close_read(status_pipe[0],status_open);}else if(n==0){close_read(status_pipe[0],status_open);}else if(n<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR)close_read(status_pipe[0],status_open);};
   while(out_open||err_open||status_open||!child_done){
-    pollfd fds[3]={{out_pipe[0],static_cast<short>(out_open?POLLIN|POLLHUP:0),0},{err_pipe[0],static_cast<short>(err_open?POLLIN|POLLHUP:0),0},{status_pipe[0],static_cast<short>(status_open?POLLIN|POLLHUP:0),0}};
-    poll(fds,3,20);
-    if(out_open)drain(out_pipe[0],result.out,out_open,result.truncated_out);
-    if(err_open)drain(err_pipe[0],result.err,err_open,result.truncated_err);
-    if(status_open)read_exec_status();
+    pollfd fds[3]={{out_open?out_pipe[0]:-1,static_cast<short>(out_open?POLLIN|POLLHUP:0),0},{err_open?err_pipe[0]:-1,static_cast<short>(err_open?POLLIN|POLLHUP:0),0},{status_open?status_pipe[0]:-1,static_cast<short>(status_open?POLLIN|POLLHUP:0),0}};
+    auto now=std::chrono::steady_clock::now();
+    auto left=std::chrono::duration_cast<std::chrono::milliseconds>(deadline-now).count();
+    int wait_ms=static_cast<int>(std::max<long long>(0,std::min<long long>(100,left)));
+    int ready; do { ready=poll(fds,3,wait_ms); } while(ready<0&&errno==EINTR&&std::chrono::steady_clock::now()<deadline);
+    if(ready>0&&out_open&&(fds[0].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)))drain(out_pipe[0],result.out,out_open,result.truncated_out);
+    if(ready>0&&err_open&&(fds[1].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)))drain(err_pipe[0],result.err,err_open,result.truncated_err);
+    if(ready>0&&status_open&&(fds[2].revents&(POLLIN|POLLHUP|POLLERR|POLLNVAL)))read_exec_status();
     reap();
     if(std::chrono::steady_clock::now()>=deadline&&(out_open||err_open||status_open||!child_done)){
       result.timed_out=true;kill(-pid,SIGKILL);

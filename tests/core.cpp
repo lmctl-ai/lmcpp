@@ -9,6 +9,7 @@
 #include <fstream>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <signal.h>
 using namespace lmcpp;
 static CliSpec spec(){CliSpec s{"t","1",{}};Operation o{"add",Access::Read,"", "object",{{"a",Type::Number,true},{"b",Type::Number,true}}};o.handler=[](const Params&p){return Json{{"value",p.at("a").get<int>()+p.at("b").get<int>()}};};s.operations.push_back(o);Operation en{"enum",Access::Read,"","object",{{"x",Type::String,true,nullptr,{"a","b"}}}};en.handler=[](const Params&p){return p;};s.operations.push_back(en);return s;}
@@ -63,6 +64,7 @@ int main(){array_regression();auto s=spec();auto schema=publish_schema(s);assert
   { int input[2];assert(pipe(input)==0);int saved=dup(STDIN_FILENO);assert(saved>=0);assert(::write(input[1],"inherited\n",10)==10);close(input[1]);dup2(input[0],STDIN_FILENO);close(input[0]);auto c=run_child({"/bin/sh","-c","read x || x=EOF; printf %s \"$x\""},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));dup2(saved,STDIN_FILENO);close(saved);assert(c.out=="EOF"); }
   { int fd=open("/etc/hostname",O_RDONLY);assert(fd>=3);std::string check="test ! -e /proc/self/fd/"+std::to_string(fd);auto c=run_child({"/bin/sh","-c",check},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));close(fd);assert(c.exit_code==0); }
   { auto start=std::chrono::steady_clock::now();auto c=run_child({"/bin/sh","-c","setsid sleep 6 & exit 0"},{{"PATH","/usr/bin:/bin"}},std::chrono::milliseconds(300));auto elapsed=std::chrono::steady_clock::now()-start;assert(c.timed_out&&elapsed<std::chrono::seconds(2)); }
+  { rusage before{},after{};assert(getrusage(RUSAGE_SELF,&before)==0);auto c=run_child({"/bin/sleep","1"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(3));assert(getrusage(RUSAGE_SELF,&after)==0);double cpu=(after.ru_utime.tv_sec-before.ru_utime.tv_sec)+(after.ru_stime.tv_sec-before.ru_stime.tv_sec)+(after.ru_utime.tv_usec-before.ru_utime.tv_usec)/1e6+(after.ru_stime.tv_usec-before.ru_stime.tv_usec)/1e6;assert(c.exit_code==0&&!c.timed_out&&cpu<0.05); }
   { struct sigaction old_action{},ignored{};ignored.sa_handler=SIG_IGN;sigemptyset(&ignored.sa_mask);sigaction(SIGCHLD,&ignored,&old_action);auto c=run_child({"/bin/sh","-c","exit 3"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));sigaction(SIGCHLD,&old_action,nullptr);assert(c.status_unknown&&c.exit_code==-1&&!c.status_error.empty()); }
   { auto missing=run_child({"/not/a/real/executable"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));assert(missing.exec_failed&&missing.exec_errno==ENOENT&&!missing.exec_error.empty());auto exited=run_child({"/bin/sh","-c","exit 127"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));assert(!exited.exec_failed&&exited.exit_code==127); }
   { struct sigaction old_action{},ignored{};ignored.sa_handler=SIG_IGN;sigemptyset(&ignored.sa_mask);sigaction(SIGPIPE,&ignored,&old_action);auto c=run_child({"/bin/sh","-c","kill -PIPE $$"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2));sigaction(SIGPIPE,&old_action,nullptr);assert(c.signal==SIGPIPE&&c.exit_code==128+SIGPIPE); }
