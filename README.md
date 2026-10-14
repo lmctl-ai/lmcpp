@@ -22,6 +22,8 @@ Write operations are blocked by `--readonly` or `<TOOL>_READONLY=1` (also `true`
 
 `Context::temp_file_path()` provides a private temporary path removed when its context is destroyed. `read_result_file(path, "json"|"text")` accepts regular files up to 16 MiB; oversized output becomes `COMMAND_FAILED` with `data.tool_code` `OUTPUT_TOO_LARGE`.
 
+`run_child(argv, env, timeout, max_capture)` runs an argv vector without a shell, replaces the child environment with the supplied map, captures bounded stdout/stderr, and kills the process group on timeout. It is intended for native tool adapters that need an isolated helper process.
+
 ## Install and use
 
 ```sh

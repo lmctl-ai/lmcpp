@@ -53,4 +53,5 @@ int main(){auto s=spec();auto schema=publish_schema(s);assert(schema==publish_sc
   assert(Json::parse(out.str())["op"]=="add");
   out.str("");assert(run_cli_io(s,{"add","--input-json","{}","--input-json","{}"},out,err)==2);
   assert(Json::parse(out.str())["error"]["data"]["issues"][0]["code"]=="DUPLICATE_FLAG");
+  { auto child=run_child({"/bin/sh","-c","printf ok; printf err >&2"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2),8); assert(child.exit_code==0&&!child.timed_out&&child.out=="ok"&&child.err=="err"); auto capped=run_child({"/bin/sh","-c","printf 123456789"},{{"PATH","/usr/bin:/bin"}},std::chrono::seconds(2),4);assert(capped.out=="1234"); auto timeout=run_child({"/bin/sleep","2"},{{"PATH","/usr/bin:/bin"}},std::chrono::milliseconds(20));assert(timeout.timed_out); auto descendant=run_child({"/bin/sh","-c","sleep 2 & exit 0"},{{"PATH","/usr/bin:/bin"}},std::chrono::milliseconds(20));assert(descendant.timed_out); }
 }

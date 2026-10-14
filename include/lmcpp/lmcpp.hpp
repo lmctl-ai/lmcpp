@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <map>
+#include <chrono>
 
 namespace lmcpp {
 using Json = nlohmann::ordered_json;
@@ -42,6 +44,13 @@ class Context {
   const std::string& temp_file_path();
  private: std::string path_;
 };
+struct ChildResult { int exit_code=-1; bool timed_out=false; std::string out, err; };
+// Executes argv directly (never through a shell), with the supplied environment,
+// bounded output capture, and process-group termination on timeout.
+ChildResult run_child(const std::vector<std::string>& argv,
+                      const std::map<std::string,std::string>& env,
+                      std::chrono::milliseconds timeout,
+                      std::size_t max_capture=1024*1024);
 Json read_result_file(const std::string& path, const std::string& format);
 Json publish_schema(const CliSpec& spec);
 Json validate_params(const Operation& op, const Json& raw, const std::string& form="json");

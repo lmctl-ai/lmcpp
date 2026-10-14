@@ -8,6 +8,7 @@ All notable changes to lmcpp are documented here.
 
 - C++17 server SDK for `cli.schema.v1`, flags and JSON validation, policy floors, result files, and error envelopes.
 - Toy native tool, lmapi server conformance tests, installable CMake package, and consumer smoke test.
+- POSIX `run_child` helper for isolated argv execution with environment replacement, timeout/process-group kill, and bounded output capture.
 
 ### Fixed
 

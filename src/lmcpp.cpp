@@ -8,11 +8,80 @@
 #include <cctype>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <chrono>
+#include <map>
 #include <set>
 #include <fcntl.h>
 #include <cerrno>
 
 namespace lmcpp {
+ChildResult run_child(const std::vector<std::string>& argv,
+                      const std::map<std::string,std::string>& env,
+                      std::chrono::milliseconds timeout,
+                      std::size_t max_capture) {
+  if (argv.empty() || argv[0].empty()) throw std::invalid_argument("run_child requires argv[0]");
+  int out_pipe[2], err_pipe[2];
+  if (pipe(out_pipe) != 0) throw std::runtime_error("stdout pipe failed");
+  if (pipe(err_pipe) != 0) { close(out_pipe[0]); close(out_pipe[1]); throw std::runtime_error("stderr pipe failed"); }
+  pid_t pid = fork();
+  if (pid < 0) { close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]); throw std::runtime_error("fork failed"); }
+  if (pid == 0) {
+    setpgid(0, 0);
+    dup2(out_pipe[1], STDOUT_FILENO); dup2(err_pipe[1], STDERR_FILENO);
+    close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
+    clearenv();
+    for (const auto& item : env) setenv(item.first.c_str(), item.second.c_str(), 1);
+    std::vector<char*> child_argv;
+    for (const auto& arg : argv) child_argv.push_back(const_cast<char*>(arg.c_str()));
+    child_argv.push_back(nullptr);
+    execvp(child_argv[0], child_argv.data());
+    _exit(127);
+  }
+  setpgid(pid, pid);
+  close(out_pipe[1]); close(err_pipe[1]);
+  fcntl(out_pipe[0], F_SETFL, fcntl(out_pipe[0], F_GETFL) | O_NONBLOCK);
+  fcntl(err_pipe[0], F_SETFL, fcntl(err_pipe[0], F_GETFL) | O_NONBLOCK);
+  ChildResult result;
+  bool out_open = true, err_open = true, child_done = false;
+  int status = 0;
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  auto drain = [&](int fd, std::string& target, bool& open) {
+    char buffer[4096];
+    for (;;) {
+      ssize_t n = read(fd, buffer, sizeof(buffer));
+      if (n > 0) {
+        const std::size_t room = target.size() < max_capture ? max_capture - target.size() : 0;
+        target.append(buffer, std::min(static_cast<std::size_t>(n), room));
+      } else if (n == 0) { close(fd); open = false; break; }
+      else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      else if (errno != EINTR) { close(fd); open = false; break; }
+    }
+  };
+  while (out_open || err_open || !child_done) {
+    pollfd fds[2] = {{out_pipe[0], static_cast<short>(out_open ? POLLIN|POLLHUP : 0), 0},
+                     {err_pipe[0], static_cast<short>(err_open ? POLLIN|POLLHUP : 0), 0}};
+    poll(fds, 2, 20);
+    if (out_open) drain(out_pipe[0], result.out, out_open);
+    if (err_open) drain(err_pipe[0], result.err, err_open);
+    if (!child_done) {
+      pid_t waited = waitpid(pid, &status, WNOHANG);
+      if (waited == pid) child_done = true;
+      else if (waited < 0 && errno != EINTR) { child_done = true; status = 0; }
+    }
+    if (!result.timed_out && std::chrono::steady_clock::now() >= deadline &&
+        (!child_done || out_open || err_open)) {
+      result.timed_out = true;
+      kill(-pid, SIGKILL);
+      if (!child_done) { while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} child_done = true; }
+    }
+  }
+  result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+  return result;
+}
 static const char* type_name(Type t) { switch(t){case Type::String:return "string";case Type::Number:case Type::Integer:return "number";case Type::Boolean:return "boolean";case Type::Object:return "object";case Type::Array:return "array";case Type::Json:return "json";} return "string"; }
 static int exit_for(ErrorCode c) { switch(c){case ErrorCode::InvalidRequest:case ErrorCode::ValidationError:return 2;case ErrorCode::ParseError:return 3;case ErrorCode::NotFound:return 4;case ErrorCode::Conflict:return 5;case ErrorCode::Forbidden:case ErrorCode::ReadOnlyViolation:return 6;case ErrorCode::Timeout:return 7;case ErrorCode::ServiceUnavailable:return 8;case ErrorCode::MissingConfirmation:return 9;case ErrorCode::UnsupportedProductVersion:return 10;default:return 1;} }
 static std::string code_name(ErrorCode c) { switch(c){case ErrorCode::InvalidRequest:return "INVALID_REQUEST";case ErrorCode::ValidationError:return "VALIDATION_ERROR";case ErrorCode::ParseError:return "PARSE_ERROR";case ErrorCode::NotFound:return "NOT_FOUND";case ErrorCode::Conflict:return "CONFLICT";case ErrorCode::Forbidden:return "FORBIDDEN";case ErrorCode::ReadOnlyViolation:return "READONLY_VIOLATION";case ErrorCode::Timeout:return "TIMEOUT";case ErrorCode::ServiceUnavailable:return "SERVICE_UNAVAILABLE";case ErrorCode::MissingConfirmation:return "MISSING_CONFIRMATION";case ErrorCode::UnsupportedProductVersion:return "UNSUPPORTED_PRODUCT_VERSION";case ErrorCode::InternalError:return "INTERNAL_ERROR";case ErrorCode::CommandFailed:return "COMMAND_FAILED";} return "UNKNOWN_ERROR"; }
