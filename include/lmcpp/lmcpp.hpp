@@ -24,15 +24,17 @@ struct Param {
   bool positional=false, cli_only=false, doc_only=false;
   std::vector<std::string> aliases;
   Type item_type=Type::String;
+  // Accept the explicit JSON strings NA, NaN, Inf, -Inf (and null) for numeric values.
+  bool allow_special_numbers=false;
   Param()=default;
   Param(std::string n, Type t, bool required=true, Json def=nullptr,
         std::vector<Json> values={}, std::string desc={}, std::string cardinality="",
         bool pos=false, bool cli=false, bool doc=false,
-        std::vector<std::string> names={}, Type item=Type::String)
+        std::vector<std::string> names={}, Type item=Type::String, bool special_numbers=false)
       : name(std::move(n)), type(t), default_value(std::move(def)),
         enum_values(std::move(values)), description(std::move(desc)),
         occurs(cardinality.empty() ? (required ? "1" : "?") : std::move(cardinality)),
-        positional(pos), cli_only(cli), doc_only(doc), aliases(std::move(names)), item_type(item) {}
+        positional(pos), cli_only(cli), doc_only(doc), aliases(std::move(names)), item_type(item), allow_special_numbers(special_numbers) {}
 };
 struct Context;
 struct Operation { std::string name; Access access=Access::Read; std::string description; std::string returns="object"; std::vector<Param> params; std::function<Json(const Params&)> handler; std::function<Json(const Params&,Context&)> context_handler; bool dangerous=false; };

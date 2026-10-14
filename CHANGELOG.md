@@ -10,6 +10,7 @@ All notable changes to lmcpp are documented here.
 - Toy native tool, lmapi server conformance tests, installable CMake package, and consumer smoke test.
 - Harden POSIX `run_child`: `/dev/null` stdin, closed inherited descriptors, reset child signals, Linux parent-death handling, explicit exec/status errors, signal and truncation fields, and timeout return despite escaped descendants.
 - Match protocol/lmts array flag behavior: scalar item flags, repeated values, equals syntax, and coercion by published item type; add a local conformance proposal.
+- Allow numeric params to opt into explicit `null`, `NA`, `NaN`, `Inf`, and `-Inf` values without changing their published numeric type.
 
 ### Fixed
 

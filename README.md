@@ -26,6 +26,8 @@ Write operations are blocked by `--readonly` or `<TOOL>_READONLY=1` (also `true`
 
 For array parameters, CLI flags take one item per occurrence: `--p 0.975` produces `[0.975]`; repeated flags produce an array in order. `--p=0.975` is equivalent. Values are coerced using the declared `items` type. JSON-array text as one flag value is not accepted; use repeated item flags.
 
+Numeric parameters can explicitly opt into the conventional special values `null`, `"NA"`, `"NaN"`, `"Inf"`, and `"-Inf"` with `Param::allow_special_numbers`; the published item type remains `number`.
+
 ## Install and use
 
 ```sh
