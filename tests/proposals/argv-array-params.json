@@ -1,0 +1,29 @@
+{
+  "proposal": "local-only; do not copy into lmapi/conformance without upstream review",
+  "cases": [
+    {
+      "name": "array numeric scalar flag",
+      "schema": {"name":"dist","params":[{"name":"p","type":"array","occurs":"1","items":"number"}]},
+      "argv": ["--p","0.975"],
+      "expect": {"ok":true,"params":{"p":[0.975]},"positionals":[],"globals":{}}
+    },
+    {
+      "name": "array numeric repeated and inline flags",
+      "schema": {"name":"dist","params":[{"name":"p","type":"array","occurs":"1","items":"number"}]},
+      "argv": ["--p=0.975","--p","0.5"],
+      "expect": {"ok":true,"params":{"p":[0.975,0.5]},"positionals":[],"globals":{}}
+    },
+    {
+      "name": "array item values are coerced by items type",
+      "schema": {"name":"dist","params":[{"name":"p","type":"array","occurs":"1","items":"number"}]},
+      "argv": ["--p","not-a-number"],
+      "expect": {"ok":false,"issues":[{"code":"TYPE_MISMATCH","param":"p"}]}
+    },
+    {
+      "name": "array JSON text is not an item value",
+      "schema": {"name":"dist","params":[{"name":"p","type":"array","occurs":"1","items":"number"}]},
+      "argv": ["--p","[0.975]"],
+      "expect": {"ok":false,"issues":[{"code":"TYPE_MISMATCH","param":"p"}]}
+    }
+  ]
+}

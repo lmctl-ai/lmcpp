@@ -14,6 +14,13 @@
 #include <poll.h>
 #include <chrono>
 #include <map>
+#include <cstring>
+#include <limits>
+#include <sys/resource.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#endif
 #include <set>
 #include <fcntl.h>
 #include <cerrno>
@@ -24,62 +31,123 @@ ChildResult run_child(const std::vector<std::string>& argv,
                       std::chrono::milliseconds timeout,
                       std::size_t max_capture) {
   if (argv.empty() || argv[0].empty()) throw std::invalid_argument("run_child requires argv[0]");
-  int out_pipe[2], err_pipe[2];
-  if (pipe(out_pipe) != 0) throw std::runtime_error("stdout pipe failed");
-  if (pipe(err_pipe) != 0) { close(out_pipe[0]); close(out_pipe[1]); throw std::runtime_error("stderr pipe failed"); }
+  for (const auto& arg : argv) if (arg.find('\0') != std::string::npos) throw std::invalid_argument("argv contains NUL");
+  for (const auto& item : env) {
+    if (item.first.empty() || item.first.find('=') != std::string::npos || item.first.find('\0') != std::string::npos || item.second.find('\0') != std::string::npos)
+      throw std::invalid_argument("invalid environment entry");
+  }
+
+  // Build every allocation-bearing object before fork: the child uses only async-signal-safe calls.
+  std::vector<std::string> environment;
+  std::string search_path = "/bin:/usr/bin";
+  for (const auto& item : env) {
+    environment.push_back(item.first + "=" + item.second);
+    if (item.first == "PATH") search_path = item.second;
+  }
+  std::vector<char*> envp;
+  for (auto& item : environment) envp.push_back(item.data());
+  envp.push_back(nullptr);
+  std::string executable = argv[0];
+  if (executable.find('/') == std::string::npos) {
+    std::string candidate;
+    bool found = false;
+    std::size_t begin = 0;
+    do {
+      std::size_t end = search_path.find(':', begin);
+      std::string dir = search_path.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+      candidate = (dir.empty() ? std::string(".") : dir) + "/" + executable;
+      if (access(candidate.c_str(), X_OK) == 0) { executable = candidate; found = true; break; }
+      begin = end == std::string::npos ? end : end + 1;
+    } while (begin != std::string::npos);
+    if (!found && !candidate.empty()) executable = candidate; // execve reports the precise final errno.
+  }
+  std::vector<char*> child_argv;
+  for (const auto& arg : argv) child_argv.push_back(const_cast<char*>(arg.c_str()));
+  child_argv.push_back(nullptr);
+
+  auto make_pipe = [](int p[2]) {
+#ifdef __linux__
+    if (pipe2(p, O_CLOEXEC) == 0) return true;
+    if (errno != ENOSYS) return false;
+#endif
+    if (pipe(p) != 0) return false;
+    for (int fd : {p[0], p[1]}) {
+      int flags = fcntl(fd, F_GETFD);
+      if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) { int e=errno; close(p[0]); close(p[1]); errno=e; return false; }
+    }
+    return true;
+  };
+  int out_pipe[2], err_pipe[2], status_pipe[2];
+  if (!make_pipe(out_pipe)) throw std::runtime_error("stdout pipe failed");
+  if (!make_pipe(err_pipe)) { close(out_pipe[0]); close(out_pipe[1]); throw std::runtime_error("stderr pipe failed"); }
+  if (!make_pipe(status_pipe)) { close(out_pipe[0]);close(out_pipe[1]);close(err_pipe[0]);close(err_pipe[1]);throw std::runtime_error("exec status pipe failed"); }
+  int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+  if (null_fd < 0) { for(int fd:{out_pipe[0],out_pipe[1],err_pipe[0],err_pipe[1],status_pipe[0],status_pipe[1]})close(fd); throw std::runtime_error("open /dev/null failed"); }
+  // Pipes must live above stdio even if the caller closed one of its standard descriptors.
+  auto lift_fd = [](int& fd) { if(fd >= 3) return true; int moved=fcntl(fd,F_DUPFD_CLOEXEC,3);if(moved<0)return false;close(fd);fd=moved;return true; };
+  for (int* fd : {&out_pipe[0],&out_pipe[1],&err_pipe[0],&err_pipe[1],&status_pipe[0],&status_pipe[1],&null_fd}) {
+    if (!lift_fd(*fd)) { int e=errno;for(int* x:{&out_pipe[0],&out_pipe[1],&err_pipe[0],&err_pipe[1],&status_pipe[0],&status_pipe[1],&null_fd})if(*x>=0)close(*x);errno=e;throw std::runtime_error("normalize child descriptors failed"); }
+  }
+  long open_max = sysconf(_SC_OPEN_MAX);
+  if (open_max < 0 || open_max > 1048576) open_max = 65536;
+  const pid_t parent_pid = getpid();
   pid_t pid = fork();
-  if (pid < 0) { close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]); throw std::runtime_error("fork failed"); }
+  if (pid < 0) { int e=errno;for(int fd:{out_pipe[0],out_pipe[1],err_pipe[0],err_pipe[1],status_pipe[0],status_pipe[1],null_fd})close(fd);errno=e;throw std::runtime_error("fork failed"); }
   if (pid == 0) {
     setpgid(0, 0);
-    dup2(out_pipe[1], STDOUT_FILENO); dup2(err_pipe[1], STDERR_FILENO);
-    close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
-    clearenv();
-    for (const auto& item : env) setenv(item.first.c_str(), item.second.c_str(), 1);
-    std::vector<char*> child_argv;
-    for (const auto& arg : argv) child_argv.push_back(const_cast<char*>(arg.c_str()));
-    child_argv.push_back(nullptr);
-    execvp(child_argv[0], child_argv.data());
-    _exit(127);
+    auto child_fail = [&](int e) { (void)!write(status_pipe[1], &e, sizeof(e)); _exit(127); };
+#ifdef __linux__
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) child_fail(errno);
+    if (getppid() != parent_pid) _exit(127);
+#endif
+    if (dup2(null_fd, STDIN_FILENO) < 0 || dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(err_pipe[1], STDERR_FILENO) < 0) child_fail(errno);
+    sigset_t empty; sigemptyset(&empty); if(sigprocmask(SIG_SETMASK,&empty,nullptr)<0)child_fail(errno);
+    struct sigaction action{}; action.sa_handler=SIG_DFL; sigemptyset(&action.sa_mask);
+    for(int sig=1;sig<NSIG;++sig) { if(sig==SIGKILL||sig==SIGSTOP)continue; if(sigaction(sig,&action,nullptr)<0&&errno!=EINVAL)child_fail(errno); }
+    bool closed = false;
+#if defined(__linux__) && defined(SYS_close_range)
+    int saved_errno=errno;
+    bool a=(status_pipe[1]<=3)||syscall(SYS_close_range,3u,static_cast<unsigned>(status_pipe[1]-1),0u)==0;
+    bool b=syscall(SYS_close_range,static_cast<unsigned>(status_pipe[1]+1),std::numeric_limits<unsigned>::max(),0u)==0;
+    closed=a&&b;
+    if(!closed)errno=saved_errno;
+#endif
+    if(!closed)for(int fd=3;fd<open_max;++fd)if(fd!=status_pipe[1])close(fd);
+    execve(executable.c_str(),child_argv.data(),envp.data());
+    child_fail(errno);
   }
+
   setpgid(pid, pid);
-  close(out_pipe[1]); close(err_pipe[1]);
-  fcntl(out_pipe[0], F_SETFL, fcntl(out_pipe[0], F_GETFL) | O_NONBLOCK);
-  fcntl(err_pipe[0], F_SETFL, fcntl(err_pipe[0], F_GETFL) | O_NONBLOCK);
+  close(out_pipe[1]); close(err_pipe[1]); close(status_pipe[1]); close(null_fd);
+  for(int fd:{out_pipe[0],err_pipe[0],status_pipe[0]})fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK);
   ChildResult result;
-  bool out_open = true, err_open = true, child_done = false;
-  int status = 0;
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
-  auto drain = [&](int fd, std::string& target, bool& open) {
-    char buffer[4096];
-    for (;;) {
-      ssize_t n = read(fd, buffer, sizeof(buffer));
-      if (n > 0) {
-        const std::size_t room = target.size() < max_capture ? max_capture - target.size() : 0;
-        target.append(buffer, std::min(static_cast<std::size_t>(n), room));
-      } else if (n == 0) { close(fd); open = false; break; }
-      else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-      else if (errno != EINTR) { close(fd); open = false; break; }
-    }
-  };
-  while (out_open || err_open || !child_done) {
-    pollfd fds[2] = {{out_pipe[0], static_cast<short>(out_open ? POLLIN|POLLHUP : 0), 0},
-                     {err_pipe[0], static_cast<short>(err_open ? POLLIN|POLLHUP : 0), 0}};
-    poll(fds, 2, 20);
-    if (out_open) drain(out_pipe[0], result.out, out_open);
-    if (err_open) drain(err_pipe[0], result.err, err_open);
-    if (!child_done) {
-      pid_t waited = waitpid(pid, &status, WNOHANG);
-      if (waited == pid) child_done = true;
-      else if (waited < 0 && errno != EINTR) { child_done = true; status = 0; }
-    }
-    if (!result.timed_out && std::chrono::steady_clock::now() >= deadline &&
-        (!child_done || out_open || err_open)) {
-      result.timed_out = true;
-      kill(-pid, SIGKILL);
-      if (!child_done) { while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} child_done = true; }
+  bool out_open=true,err_open=true,status_open=true,child_done=false;
+  int status=0; bool have_status=false;
+  const auto deadline=std::chrono::steady_clock::now()+timeout;
+  auto close_read=[](int&fd,bool&open){if(open){close(fd);open=false;}};
+  auto drain=[&](int fd,std::string&target,bool&open,bool&truncated){char buffer[4096];for(;;){ssize_t n=read(fd,buffer,sizeof(buffer));if(n>0){std::size_t room=target.size()<max_capture?max_capture-target.size():0;std::size_t take=std::min(static_cast<std::size_t>(n),room);target.append(buffer,take);if(take<static_cast<std::size_t>(n))truncated=true;}else if(n==0){close(fd);open=false;break;}else if(errno==EAGAIN||errno==EWOULDBLOCK)break;else if(errno!=EINTR){close(fd);open=false;break;}}};
+  auto reap=[&](){if(child_done)return;pid_t waited=waitpid(pid,&status,WNOHANG);if(waited==pid){child_done=true;have_status=true;}else if(waited<0&&errno!=EINTR){child_done=true;result.status_unknown=true;result.status_error=strerror(errno);}};
+  auto read_exec_status=[&](){if(!status_open)return;int e=0;ssize_t n=read(status_pipe[0],&e,sizeof(e));if(n==static_cast<ssize_t>(sizeof(e))){result.exec_failed=true;result.exec_errno=e;result.exec_error=strerror(e);close_read(status_pipe[0],status_open);}else if(n==0){close_read(status_pipe[0],status_open);}else if(n<0&&errno!=EAGAIN&&errno!=EWOULDBLOCK&&errno!=EINTR)close_read(status_pipe[0],status_open);};
+  while(out_open||err_open||status_open||!child_done){
+    pollfd fds[3]={{out_pipe[0],static_cast<short>(out_open?POLLIN|POLLHUP:0),0},{err_pipe[0],static_cast<short>(err_open?POLLIN|POLLHUP:0),0},{status_pipe[0],static_cast<short>(status_open?POLLIN|POLLHUP:0),0}};
+    poll(fds,3,20);
+    if(out_open)drain(out_pipe[0],result.out,out_open,result.truncated_out);
+    if(err_open)drain(err_pipe[0],result.err,err_open,result.truncated_err);
+    if(status_open)read_exec_status();
+    reap();
+    if(std::chrono::steady_clock::now()>=deadline&&(out_open||err_open||status_open||!child_done)){
+      result.timed_out=true;kill(-pid,SIGKILL);
+      const auto grace=std::chrono::steady_clock::now()+std::chrono::milliseconds(100);
+      while(std::chrono::steady_clock::now()<grace&&(out_open||err_open||status_open||!child_done)){
+        pollfd gfds[3]={{out_pipe[0],static_cast<short>(out_open?POLLIN|POLLHUP:0),0},{err_pipe[0],static_cast<short>(err_open?POLLIN|POLLHUP:0),0},{status_pipe[0],static_cast<short>(status_open?POLLIN|POLLHUP:0),0}};poll(gfds,3,10);
+        if(out_open)drain(out_pipe[0],result.out,out_open,result.truncated_out);if(err_open)drain(err_pipe[0],result.err,err_open,result.truncated_err);if(status_open)read_exec_status();reap();
+      }
+      close_read(out_pipe[0],out_open);close_read(err_pipe[0],err_open);close_read(status_pipe[0],status_open);
+      if(!child_done){while(waitpid(pid,&status,0)<0){if(errno==EINTR)continue;result.status_unknown=true;result.status_error=strerror(errno);break;}if(!result.status_unknown)have_status=true;child_done=true;}
+      break;
     }
   }
-  result.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+  if(have_status){if(WIFEXITED(status))result.exit_code=WEXITSTATUS(status);else if(WIFSIGNALED(status)){result.signal=WTERMSIG(status);result.exit_code=128+result.signal;}}
   return result;
 }
 static const char* type_name(Type t) { switch(t){case Type::String:return "string";case Type::Number:case Type::Integer:return "number";case Type::Boolean:return "boolean";case Type::Object:return "object";case Type::Array:return "array";case Type::Json:return "json";} return "string"; }
@@ -104,7 +172,7 @@ static std::vector<Param> globals(){return {Param{"dryrun",Type::Boolean,false,n
 Resolved resolve_input(const CliSpec&s,const std::vector<std::string>&a){if(a.empty())throw Error{ErrorCode::InvalidRequest,"missing operation name"};const Operation*o=nullptr;for(const auto&x:s.operations)if(x.name==a[0])o=&x;if(!o)throw Error{ErrorCode::InvalidRequest,"unknown operation: "+a[0],{{"op",a[0]}}};std::vector<std::string>tail(a.begin()+1,a.end());Json parsed=parse_argv(*o,tail,globals()),g=parsed["globals"];if(g.contains("input-json")||g.contains("input-file")){if(!parsed["params"].empty()||!parsed["positionals"].empty())throw Error{ErrorCode::ValidationError,"cannot mix document input with operation flags",{{"issues",Json::array({Json{{"code","MIXED_INPUT"},{"message","cannot mix document input with operation flags"}}})}}};if(g.contains("input-json")&&g.contains("input-file"))throw Error{ErrorCode::ValidationError,"multiple document inputs",{{"issues",Json::array({Json{{"code","MIXED_INPUT"},{"message","multiple document inputs"}}})}}};std::string text=g.contains("input-json")?g["input-json"].get<std::string>():read_regular_bounded(g["input-file"].get<std::string>(),16*1024*1024,ErrorCode::ParseError,"JSON input file");std::string docop;Json p=get_document_params(parse_limited(text),docop);if(!docop.empty()&&docop!=o->name)throw Error{ErrorCode::ValidationError,"operation mismatch",{{"issues",Json::array({Json{{"code","OP_MISMATCH"},{"op",docop},{"message","operation mismatch"}}})}}};return{o->name,validate(*o,p,"json")};}return{o->name,parsed["params"]};}
 Json parse_argv(const Operation&o,const std::vector<std::string>&argv,const std::vector<Param>&globalspec){Json raw=Json::object(),g=Json::object(),pos=Json::array(),issues=Json::array();std::vector<const Param*> slots;for(const auto&p:o.params)if(p.positional)slots.push_back(&p);size_t pi=0;bool after=false;auto keb=[](std::string x){std::replace(x.begin(),x.end(),'_','-');return x;};auto find=[&](const std::string&n,const std::vector<Param>&v)->const Param*{for(const auto&p:v)if(n==p.name||n==keb(p.name)||std::find(p.aliases.begin(),p.aliases.end(),n)!=p.aliases.end())return &p;return nullptr;};auto short_alias=[&](const std::string&t){if(t.size()!=2||t[0]!='-')return false;std::string alias=t.substr(1);for(const auto&p:o.params)if(std::find(p.aliases.begin(),p.aliases.end(),alias)!=p.aliases.end())return true;return false;};auto issue=[&](std::string c,std::string m,std::string p=""){Json x={{"code",c},{"message",m}};if(!p.empty())x["param"]=p;issues.push_back(x);};
 for(size_t i=0;i<argv.size();++i){std::string tok=argv[i];if(tok=="--"&&!after){after=true;continue;}if(after||(tok.rfind("--",0)!=0&&!short_alias(tok))){pos.push_back(tok);if(pi<slots.size()){const Param&p=*slots[pi];Type t=p.type==Type::Array?p.item_type:p.type;Json value=tok;if(t!=Type::String){try{value=parse_limited(tok);if(t==Type::Integer&&!value.is_number_integer())throw 1;if(t==Type::Number&&!value.is_number())throw 1;if(t==Type::Boolean&&!value.is_boolean())throw 1;if(t==Type::Object&&!value.is_object())throw 1;if(t==Type::Array&&!value.is_array())throw 1;}catch(...){issue("TYPE_MISMATCH","invalid positional value",p.name);continue;}}if(p.occurs=="+"||p.occurs=="*"||p.type==Type::Array){if(!raw.contains(p.name))raw[p.name]=Json::array();raw[p.name].push_back(value);}else{raw[p.name]=value;++pi;}}else issue("EXTRA_POSITIONAL","extra positional argument");continue;}
-size_t eq=tok.find('=');size_t prefix=tok.rfind("--",0)==0?2:1;std::string key=tok.substr(prefix,eq==std::string::npos?std::string::npos:eq-prefix);bool neg=false,global=false;const Param*p=find(key,o.params);if(!p&&key.rfind("no-",0)==0){const Param*c=find(key.substr(3),o.params);if(c&&c->type==Type::Boolean){p=c;neg=true;}}if(!p){p=find(key,globalspec);global=p!=nullptr;}if(!p&&key.rfind("no-",0)==0){const Param*c=find(key.substr(3),globalspec);if(c&&c->type==Type::Boolean){p=c;global=true;neg=true;}}if(!p){std::string identity=key;std::replace(identity.begin(),identity.end(),'-','_');issue("UNKNOWN_PARAM","unknown flag: --"+key,identity);if(eq==std::string::npos&&i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)++i;continue;}Json&dest=global?g:raw;bool multi=p->occurs=="+"||p->occurs=="*"||p->type==Type::Array;if(dest.contains(p->name)&&!multi){issue("DUPLICATE_FLAG","duplicate flag: --"+key,p->name);if(eq==std::string::npos&&p->type!=Type::Boolean&&i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)++i;continue;}Json v;if(p->type==Type::Boolean&&eq==std::string::npos&&i+1<argv.size()&&(argv[i+1]=="true"||argv[i+1]=="false")){v=argv[++i]=="true";}else if(p->type==Type::Boolean&&eq==std::string::npos)v=!neg;else if(neg){issue("TYPE_MISMATCH","negated flag takes no value",p->name);continue;}else{std::string value;if(eq!=std::string::npos)value=tok.substr(eq+1);else if(i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)value=argv[++i];else{issue("MISSING_VALUE","missing value for --"+key,p->name);continue;}if(p->type==Type::String)v=value;else try{v=parse_limited(value);if(p->type==Type::Boolean&&!v.is_boolean())throw 1;if(p->type==Type::Integer&&!v.is_number_integer())throw 1;if(p->type==Type::Number&&!v.is_number())throw 1;if(p->type==Type::Object&&!v.is_object())throw 1;if(p->type==Type::Array&&!v.is_array())throw 1;}catch(...){issue("TYPE_MISMATCH","invalid value for --"+key,p->name);continue;}}if(multi){if(!dest.contains(p->name))dest[p->name]=Json::array();if(v.is_array()&&p->type==Type::Array)for(auto&x:v)dest[p->name].push_back(x);else dest[p->name].push_back(v);}else dest[p->name]=v;}
+size_t eq=tok.find('=');size_t prefix=tok.rfind("--",0)==0?2:1;std::string key=tok.substr(prefix,eq==std::string::npos?std::string::npos:eq-prefix);bool neg=false,global=false;const Param*p=find(key,o.params);if(!p&&key.rfind("no-",0)==0){const Param*c=find(key.substr(3),o.params);if(c&&c->type==Type::Boolean){p=c;neg=true;}}if(!p){p=find(key,globalspec);global=p!=nullptr;}if(!p&&key.rfind("no-",0)==0){const Param*c=find(key.substr(3),globalspec);if(c&&c->type==Type::Boolean){p=c;global=true;neg=true;}}if(!p){std::string identity=key;std::replace(identity.begin(),identity.end(),'-','_');issue("UNKNOWN_PARAM","unknown flag: --"+key,identity);if(eq==std::string::npos&&i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)++i;continue;}Json&dest=global?g:raw;bool multi=p->occurs=="+"||p->occurs=="*"||p->type==Type::Array;if(dest.contains(p->name)&&!multi){issue("DUPLICATE_FLAG","duplicate flag: --"+key,p->name);if(eq==std::string::npos&&p->type!=Type::Boolean&&i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)++i;continue;}Type value_type=p->type==Type::Array?p->item_type:p->type;Json v;if(value_type==Type::Boolean&&eq==std::string::npos&&i+1<argv.size()&&(argv[i+1]=="true"||argv[i+1]=="false")){v=argv[++i]=="true";}else if(value_type==Type::Boolean&&eq==std::string::npos)v=!neg;else if(neg){issue("TYPE_MISMATCH","negated flag takes no value",p->name);continue;}else{std::string value;if(eq!=std::string::npos)value=tok.substr(eq+1);else if(i+1<argv.size()&&argv[i+1].rfind("--",0)!=0)value=argv[++i];else{issue("MISSING_VALUE","missing value for --"+key,p->name);continue;}if(value_type==Type::String)v=value;else try{v=parse_limited(value);if(value_type==Type::Boolean&&!v.is_boolean())throw 1;if(value_type==Type::Integer&&!v.is_number_integer())throw 1;if(value_type==Type::Number&&!v.is_number())throw 1;if(value_type==Type::Object&&!v.is_object())throw 1;if(value_type==Type::Array&&!v.is_array())throw 1;}catch(...){issue("TYPE_MISMATCH","invalid value for --"+key,p->name);continue;}}if(multi){if(!dest.contains(p->name))dest[p->name]=Json::array();dest[p->name].push_back(v);}else dest[p->name]=v;}
 try{raw=validate(o,raw,"flags");}catch(const Error&e){if(e.data.contains("issues"))for(const auto&i:e.data["issues"])issues.push_back(i);else issue("VALIDATION_ERROR",e.message);}if(!issues.empty())throw Error{ErrorCode::ValidationError,"invalid argv for \""+o.name+"\"",{{"op",o.name},{"issues",issues}}};return{{"params",raw},{"positionals",pos},{"globals",g}};}
 Json parse_published_schema(const Json&d){Json issues=Json::array();auto add=[&](std::string code,std::string param="",std::string op=""){Json x={{"code",code},{"message",code}};if(!param.empty())x["param"]=param;if(!op.empty())x["op"]=op;issues.push_back(x);};const std::vector<std::string> reserved={"__proto__","constructor","prototype"};auto checkparam=[&](const Json&p,std::string op,bool global){if(!p.is_object()){add("TYPE_MISMATCH","",op);return;}std::string n=p.value("name","");if(std::find(reserved.begin(),reserved.end(),n)!=reserved.end())add("RESERVED_NAME",n,op);static const std::vector<std::string> allowed={"name","type","occurs","default","enum","positional","items","description","aliases","cliOnly","docOnly","derived"};for(auto it=p.begin();it!=p.end();++it)if(std::find(allowed.begin(),allowed.end(),it.key())==allowed.end())add("UNKNOWN_PARAM",p.value("name",it.key()),op);if(!global&&n=="dryrun")add("DOCUMENT_PARSE",n,op);std::string t=p.value("type","");static const std::vector<std::string> types={"string","number","boolean","object","array","json"};if(std::find(types.begin(),types.end(),t)==types.end())add("ENUM_VIOLATION",n,op);std::string occ=p.value("occurs","1");if(occ!="1"&&occ!="?"&&occ!="+"&&occ!="*")add("ENUM_VIOLATION",n,op);if(p.contains("default")){const Json&v=p["default"];bool multi=occ=="+"||occ=="*"||t=="array";auto match=[&](const Json&x){if(p.contains("enum")&&std::find(p["enum"].begin(),p["enum"].end(),x)==p["enum"].end())return false;if(t=="string")return x.is_string();if(t=="number")return x.is_number();if(t=="boolean")return x.is_boolean();if(t=="object")return x.is_object();if(t=="array"){std::string item=p.value("items","string");if(item=="string")return x.is_string();if(item=="number")return x.is_number();if(item=="boolean")return x.is_boolean();if(item=="object")return x.is_object();return false;}return true;};bool ok=true;if(multi){ok=v.is_array();if(ok)for(auto&x:v)ok&=match(x);}else ok=match(v);if(!ok)add("TYPE_MISMATCH",n,op);}if(p.contains("aliases")&&p["aliases"].is_array())for(auto&a:p["aliases"])if(a.is_string()&&std::find(reserved.begin(),reserved.end(),a.get<std::string>())!=reserved.end())add("RESERVED_NAME",n,op);};
 if(!d.is_object()||d.value("schema","")!="cli.schema.v1")add("DOCUMENT_PARSE");std::string tool=d.value("tool","");if(std::find(reserved.begin(),reserved.end(),tool)!=reserved.end())add("RESERVED_NAME",tool);std::set<std::string> names;if(d.contains("operations")&&d["operations"].is_array())for(auto&o:d["operations"]){std::string n=o.value("name","");if(std::find(reserved.begin(),reserved.end(),n)!=reserved.end())add("RESERVED_NAME",n,n);if(!names.insert(n).second)add("DOCUMENT_PARSE","",n);if(o.contains("access")&&o["access"]!="read"&&o["access"]!="write"&&o["access"]!="dynamic")add("ENUM_VIOLATION","",n);if(o.contains("returns")&&o["returns"]!="object"&&o["returns"]!="array"&&o["returns"]!="string"&&o["returns"]!="number"&&o["returns"]!="boolean"&&o["returns"]!="null")add("ENUM_VIOLATION","",n);if(o.contains("params")&&o["params"].is_array())for(auto&p:o["params"])checkparam(p,n,false);}if(d.contains("globals")&&d["globals"].is_array())for(auto&p:d["globals"])checkparam(p,"",true);

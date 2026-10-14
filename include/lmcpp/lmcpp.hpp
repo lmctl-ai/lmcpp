@@ -44,9 +44,19 @@ class Context {
   const std::string& temp_file_path();
  private: std::string path_;
 };
-struct ChildResult { int exit_code=-1; bool timed_out=false; std::string out, err; };
-// Executes argv directly (never through a shell), with the supplied environment,
-// bounded output capture, and process-group termination on timeout.
+struct ChildResult {
+  // Normal exit status, or 128 + signal for signal termination; -1 if wait status is unknown.
+  int exit_code=-1;
+  int signal=0;
+  bool timed_out=false, status_unknown=false, exec_failed=false;
+  bool truncated_out=false, truncated_err=false;
+  int exec_errno=0;
+  std::string exec_error, status_error, out, err;
+};
+// Executes argv directly (never through a shell), replaces the environment,
+// redirects stdin from /dev/null, closes inherited descriptors, captures bounded
+// output, and kills the process group on timeout. Linux also kills the child if
+// its parent dies; other POSIX systems do not provide that parent-death guarantee.
 ChildResult run_child(const std::vector<std::string>& argv,
                       const std::map<std::string,std::string>& env,
                       std::chrono::milliseconds timeout,
