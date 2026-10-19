@@ -13,72 +13,67 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
-
-env:
-  LMAPI_REF: e1ccceab82680437b81e80fd17f11cf7d17ecfd4
 
 jobs:
-  build-test:
-    name: ${{ matrix.os }} / ${{ matrix.compiler }}
+  linux-x64-gcc:
+    name: ubuntu-latest / gcc
     if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-latest, compiler: gcc, cxx: g++}
-          - {os: ubuntu-latest, compiler: clang, cxx: clang++}
-          - {os: ubuntu-24.04-arm, compiler: gcc, cxx: g++}
-          - {os: ubuntu-24.04-arm, compiler: clang, cxx: clang++}
-          - {os: macos-latest, compiler: AppleClang, cxx: clang++}
-          - {os: macos-15-intel, compiler: AppleClang, cxx: clang++}
-          - {os: windows-latest, compiler: MSVC, cxx: cl}
-    steps:
-      - name: Checkout lmcpp
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          path: lmcpp
-      - name: Checkout pinned lmapi conformance vectors
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          repository: lmctl-ai/lmapi
-          ref: ${{ env.LMAPI_REF }}
-          path: lmapi
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build nlohmann-json3-dev g++ clang
-      - name: macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install ninja nlohmann-json
-      - name: MSVC environment
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-      - name: Windows dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          vcpkg install nlohmann-json:x64-windows
-          "JSON_PREFIX=$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> $env:GITHUB_ENV
-      - name: Configure
-        working-directory: lmcpp
-        shell: bash
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_PREFIX_PATH="$JSON_PREFIX" -DLMCPP_REQUIRE_CONFORMANCE=ON -DLMAPI_DIR=../lmapi
-      - name: Build
-        working-directory: lmcpp
-        run: cmake --build build --parallel 2
-      - name: Test and conformance
-        working-directory: lmcpp
-        run: ctest --test-dir build -V --output-on-failure
-      - name: Install and find_package consumer
-        working-directory: lmcpp
-        shell: bash
-        run: cmake -DBUILD_DIR=build -DJSON_PREFIX="$JSON_PREFIX" -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -P scripts/test-consumer.cmake
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: ubuntu-latest
+      cxx: g++
+
+  linux-x64-clang:
+    name: ubuntu-latest / clang
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: ubuntu-latest
+      cxx: clang++
+
+  linux-arm-gcc:
+    name: ubuntu-24.04-arm / gcc
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: ubuntu-24.04-arm
+      cxx: g++
+
+  linux-arm-clang:
+    name: ubuntu-24.04-arm / clang
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: ubuntu-24.04-arm
+      cxx: clang++
+
+  macos-arm:
+    name: macos-latest / AppleClang
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: macos-latest
+      cxx: clang++
+
+  macos-intel:
+    name: macos-15-intel / AppleClang
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: macos-15-intel
+      cxx: clang++
+
+  windows:
+    name: windows-latest / MSVC
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/cpp-leg.yml
+    with:
+      runner: windows-latest
+      cxx: cl
 
   gate:
     name: CI gate
-    needs: [build-test]
+    needs: [linux-x64-gcc, linux-x64-clang, linux-arm-gcc, linux-arm-clang, macos-arm, macos-intel, windows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +82,6 @@ jobs:
         run: python3 scripts/test-ci-gate.py
       - name: List and require every leg
         env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_LEGS: '["ubuntu-latest / gcc", "ubuntu-latest / clang", "ubuntu-24.04-arm / gcc", "ubuntu-24.04-arm / clang", "macos-latest / AppleClang", "macos-15-intel / AppleClang", "windows-latest / MSVC"]'
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EXPECTED_LEGS: '{"linux-x64-gcc": "ubuntu-latest / gcc", "linux-x64-clang": "ubuntu-latest / clang", "linux-arm-gcc": "ubuntu-24.04-arm / gcc", "linux-arm-clang": "ubuntu-24.04-arm / clang", "macos-arm": "macos-latest / AppleClang", "macos-intel": "macos-15-intel / AppleClang", "windows": "windows-latest / MSVC"}'
         run: python3 scripts/ci-gate.py
