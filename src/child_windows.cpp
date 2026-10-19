@@ -2,7 +2,9 @@
 #define _WIN32_WINNT 0x0602
 #endif
 #include <lmcpp/lmcpp.hpp>
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <algorithm>
 #include <cerrno>
@@ -55,12 +57,12 @@ ChildResult run_child(const std::vector<std::string>& argv, const std::map<std::
   if (argv.empty() || argv[0].empty()) throw std::invalid_argument("run_child requires argv[0]");
   for (const auto& arg : argv) if (arg.find('\0') != std::string::npos) throw std::invalid_argument("argv contains NUL");
   std::vector<std::pair<std::wstring,std::wstring>> entries;
-  std::wstring path;
+  std::wstring path;bool path_supplied=false;
   for (const auto& item : env) {
     if (item.first.empty() || item.first.find_first_of(std::string("=\0",2)) != std::string::npos || item.second.find('\0') != std::string::npos)
       throw std::invalid_argument("invalid environment entry");
     entries.emplace_back(wide(item.first), wide(item.second));
-    if (_wcsicmp(entries.back().first.c_str(), L"PATH") == 0) path = entries.back().second;
+    if (_wcsicmp(entries.back().first.c_str(), L"PATH") == 0) {path = entries.back().second;path_supplied=true;}
   }
   auto less = [](const auto& a, const auto& b) { return CompareStringOrdinal(a.first.c_str(), -1, b.first.c_str(), -1, TRUE) == CSTR_LESS_THAN; };
   std::sort(entries.begin(), entries.end(), less);
@@ -73,7 +75,7 @@ ChildResult run_child(const std::vector<std::string>& argv, const std::map<std::
   std::wstring executable = wide(argv[0]), command;
   for (const auto& a : argv) { if (!command.empty()) command += L' '; command += quote(wide(a)); }
   if (executable.find_first_of(L"/\\:") == std::wstring::npos) {
-    if (path.empty()) { wchar_t system[MAX_PATH+1]; UINT n=GetSystemDirectoryW(system,MAX_PATH+1); if(n && n<=MAX_PATH)path.assign(system,n); }
+    if (!path_supplied) { wchar_t system[MAX_PATH+1]; UINT n=GetSystemDirectoryW(system,MAX_PATH+1); if(n && n<=MAX_PATH)path.assign(system,n); }
     std::wstring name=executable; if(std::filesystem::path(name).extension().empty())name+=L".exe";
     bool found=false;size_t begin=0;
     do { size_t end=path.find(L';',begin);auto dir=path.substr(begin,end==std::wstring::npos?end:end-begin);

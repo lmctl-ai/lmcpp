@@ -3,13 +3,16 @@
 #include <chrono>
 #include <csignal>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <cerrno>
 #ifdef _WIN32
 #include <io.h>
 #include <cstdlib>
-static int unlink(const char* p){return _unlink(p);}
-static int access(const char* p,int mode){return _access(p,mode);}
-static int setenv(const char* k,const char* v,int){return _putenv_s(k,v);}
-static int unsetenv(const char* k){return _putenv_s(k,"");}
+#define unlink _unlink
+#define access _access
+#define setenv(k,v,overwrite) _putenv_s(k,v)
+#define unsetenv(k) _putenv_s(k,"")
 #define F_OK 0
 #else
 #include <fcntl.h>

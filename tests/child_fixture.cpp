@@ -5,7 +5,9 @@
 #include <fstream>
 #include <cstdlib>
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
@@ -40,4 +42,5 @@ int main(int argc,char** argv){
     pid_t pid=fork();if(pid<0)return 2;if(pid==0){std::this_thread::sleep_for(std::chrono::seconds(10));_exit(0);}std::cout<<pid<<std::endl;
 #endif
   }
+  return 0;
 }
