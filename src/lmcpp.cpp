@@ -6,6 +6,11 @@
 #include <fstream>
 #include <cstdlib>
 #include <cctype>
+#include <filesystem>
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -21,11 +26,14 @@
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #endif
+#endif
 #include <set>
-#include <fcntl.h>
 #include <cerrno>
+#include <cstring>
+#include <limits>
 
 namespace lmcpp {
+#ifndef _WIN32
 ChildResult run_child(const std::vector<std::string>& argv,
                       const std::map<std::string,std::string>& env,
                       std::chrono::milliseconds timeout,
@@ -153,14 +161,37 @@ ChildResult run_child(const std::vector<std::string>& argv,
   if(have_status){if(WIFEXITED(status))result.exit_code=WEXITSTATUS(status);else if(WIFSIGNALED(status)){result.signal=WTERMSIG(status);result.exit_code=128+result.signal;}}
   return result;
 }
+#endif
 static const char* type_name(Type t) { switch(t){case Type::String:return "string";case Type::Number:case Type::Integer:return "number";case Type::Boolean:return "boolean";case Type::Object:return "object";case Type::Array:return "array";case Type::Json:return "json";} return "string"; }
 static int exit_for(ErrorCode c) { switch(c){case ErrorCode::InvalidRequest:case ErrorCode::ValidationError:return 2;case ErrorCode::ParseError:return 3;case ErrorCode::NotFound:return 4;case ErrorCode::Conflict:return 5;case ErrorCode::Forbidden:case ErrorCode::ReadOnlyViolation:return 6;case ErrorCode::Timeout:return 7;case ErrorCode::ServiceUnavailable:return 8;case ErrorCode::MissingConfirmation:return 9;case ErrorCode::UnsupportedProductVersion:return 10;default:return 1;} }
 static std::string code_name(ErrorCode c) { switch(c){case ErrorCode::InvalidRequest:return "INVALID_REQUEST";case ErrorCode::ValidationError:return "VALIDATION_ERROR";case ErrorCode::ParseError:return "PARSE_ERROR";case ErrorCode::NotFound:return "NOT_FOUND";case ErrorCode::Conflict:return "CONFLICT";case ErrorCode::Forbidden:return "FORBIDDEN";case ErrorCode::ReadOnlyViolation:return "READONLY_VIOLATION";case ErrorCode::Timeout:return "TIMEOUT";case ErrorCode::ServiceUnavailable:return "SERVICE_UNAVAILABLE";case ErrorCode::MissingConfirmation:return "MISSING_CONFIRMATION";case ErrorCode::UnsupportedProductVersion:return "UNSUPPORTED_PRODUCT_VERSION";case ErrorCode::InternalError:return "INTERNAL_ERROR";case ErrorCode::CommandFailed:return "COMMAND_FAILED";} return "UNKNOWN_ERROR"; }
 static std::string safe_dump(const Json&j,int indent=-1) noexcept {try{return j.dump(indent,' ',false,Json::error_handler_t::replace);}catch(...){return "{\"success\":false,\"error\":{\"code\":\"INTERNAL_ERROR\",\"message\":\"serialization failed\",\"data\":{}}}";}}
 Context::Context()=default;
-Context::~Context(){if(!path_.empty())::unlink(path_.c_str());}
-const std::string& Context::temp_file_path(){if(path_.empty()){char t[]="/tmp/lmcpp-result-XXXXXX";int fd=::mkstemp(t);if(fd<0)throw std::runtime_error("cannot create temporary result file");::close(fd);path_=t;}return path_;}
+Context::~Context(){if(!path_.empty()){std::error_code error;std::filesystem::remove(std::filesystem::u8path(path_),error);}}
+const std::string& Context::temp_file_path(){if(path_.empty()){
+#ifdef _WIN32
+  wchar_t directory[MAX_PATH+1],file[MAX_PATH+1];DWORD length=GetTempPathW(MAX_PATH+1,directory);
+  if(!length||length>MAX_PATH||!GetTempFileNameW(directory,L"lmc",0,file))throw std::runtime_error("cannot create temporary result file");
+  path_=std::filesystem::path(file).u8string();
+#else
+  std::string pattern=(std::filesystem::temp_directory_path()/"lmcpp-result-XXXXXX").string();
+  int fd=::mkstemp(pattern.data());if(fd<0)throw std::runtime_error("cannot create temporary result file");::close(fd);path_=pattern;
+#endif
+}return path_;}
+#ifdef _WIN32
+static std::string read_regular_bounded(const std::string& path,size_t cap,ErrorCode code,const std::string& kind){
+  std::filesystem::path native;try{native=std::filesystem::u8path(path);}catch(...){throw Error{code,"cannot read "+kind+": "+path};}
+  HANDLE file=CreateFileW(native.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+  if(file==INVALID_HANDLE_VALUE)throw Error{code,"cannot read "+kind+": "+path};
+  struct Closer{HANDLE h;~Closer(){CloseHandle(h);}} closer{file};BY_HANDLE_FILE_INFORMATION info{};
+  if(GetFileType(file)!=FILE_TYPE_DISK||!GetFileInformationByHandle(file,&info)||(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY))throw Error{code,kind+" must be a regular file: "+path};
+  std::string data;char buf[8192];while(data.size()<=cap){DWORD n=0;DWORD want=static_cast<DWORD>(std::min(sizeof(buf),cap+1-data.size()));
+    if(!ReadFile(file,buf,want,&n,nullptr))throw Error{code,"cannot read "+kind+": "+path};if(!n)break;data.append(buf,n);}
+  if(data.size()>cap){bool output=kind=="result file";throw Error{output?ErrorCode::CommandFailed:ErrorCode::ParseError,kind+" exceeds 16777216 bytes",{{"tool_code",output?"OUTPUT_TOO_LARGE":"INPUT_TOO_LARGE"},{"limit",cap}}};}return data;
+}
+#else
 static std::string read_regular_bounded(const std::string&path,size_t cap,ErrorCode code,const std::string&kind){int fd=::open(path.c_str(),O_RDONLY|O_NONBLOCK);if(fd<0)throw Error{code,"cannot read "+kind+": "+path};struct stat st{};if(::fstat(fd,&st)!=0||!S_ISREG(st.st_mode)){::close(fd);throw Error{code,kind+" must be a regular file: "+path};}std::string data;char buf[8192];while(data.size()<=cap){size_t want=std::min(sizeof(buf),cap+1-data.size());ssize_t n=::read(fd,buf,want);if(n<0&&errno==EINTR)continue;if(n<0){::close(fd);throw Error{code,"cannot read "+kind+": "+path};}if(n==0)break;data.append(buf,static_cast<size_t>(n));}::close(fd);if(data.size()>cap){bool output=kind=="result file";throw Error{output?ErrorCode::CommandFailed:ErrorCode::ParseError,kind+" exceeds 16777216 bytes",{{"tool_code",output?"OUTPUT_TOO_LARGE":"INPUT_TOO_LARGE"},{"limit",cap}}};}return data;}
+#endif
 Json read_result_file(const std::string&path,const std::string&format){constexpr size_t cap=16*1024*1024;if(format!="json"&&format!="text")throw Error{ErrorCode::InvalidRequest,"unsupported result file format: "+format};std::string data=read_regular_bounded(path,cap,ErrorCode::CommandFailed,"result file");if(format=="text")return Json{{"text",data}};try{return Json::parse(data);}catch(...){throw Error{ErrorCode::CommandFailed,"result file contains malformed JSON",{{"tool_code","INVALID_RESULT_JSON"}}};}}
 static Json param_json(const Param&p){Json j={{"name",p.name},{"type",type_name(p.type)},{"occurs",p.occurs}};if(!p.default_value.is_null())j["default"]=p.default_value;if(!p.enum_values.empty())j["enum"]=p.enum_values;if(!p.description.empty())j["description"]=p.description;if(p.type==Type::Array)j["items"]=type_name(p.item_type);if(!p.aliases.empty())j["aliases"]=p.aliases;if(p.positional)j["positional"]=true;return j;}
 Json publish_schema(const CliSpec& s) { Json ops=Json::array(); for(const auto& o:s.operations){Json ps=Json::array();for(const auto&p:o.params)ps.push_back(param_json(p));ops.push_back({{"name",o.name},{"access",o.access==Access::Read?"read":"write"},{"returns",o.returns},{"description",o.description},{"params",ps}});} return {{"schema","cli.schema.v1"},{"tool",s.tool},{"version",s.version},{"inputs",{"flags","json"}},{"globals",Json::array()},{"operations",ops}}; }

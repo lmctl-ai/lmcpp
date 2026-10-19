@@ -1,4 +1,5 @@
 #include <lmcpp/lmcpp.hpp>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <filesystem>

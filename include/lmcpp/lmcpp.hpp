@@ -57,7 +57,7 @@ struct ChildResult {
 };
 // Executes argv directly (never through a shell), replaces the environment,
 // redirects stdin from /dev/null, closes inherited descriptors, captures bounded
-// output, and kills the process group on timeout. Linux also kills the child if
+// output, and kills the process group (Windows: Job Object tree) on timeout. Linux also kills the child if
 // its parent dies; other POSIX systems do not provide that parent-death guarantee.
 ChildResult run_child(const std::vector<std::string>& argv,
                       const std::map<std::string,std::string>& env,

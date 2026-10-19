@@ -73,3 +73,10 @@ Or run the same tools in the `lmcpp-dev` Docker image:
 ```
 
 Run the AddressSanitizer and UndefinedBehaviorSanitizer suite with `./scripts/test-sanitized.sh`. CI configures `-DLMCPP_REQUIRE_CONFORMANCE=ON`, making absent lmapi vectors fail the conformance test instead of omitting it.
+## Platforms
+
+CI requires seven independent compiler legs: GCC and Clang on `ubuntu-latest` (x64) and `ubuntu-24.04-arm`, AppleClang on `macos-latest` (arm64) and `macos-15-intel`, and MSVC on `windows-latest`. Every leg builds with CMake/Ninja, runs core/portable-child tests and the pinned lmapi conformance vectors, then installs the library and builds a separate `find_package` consumer. The final CI gate lists every leg and fails on missing, skipped or unsuccessful legs; no platform is allowed to fail silently.
+
+`run_child` executes argv directly. POSIX uses fork/exec and process groups; Windows uses UTF-8-to-UTF-16 arguments, CRT-compatible quoting, an explicit inherited-handle list and a kill-on-close Job Object (including descendants). Windows environment names are case-insensitive; duplicate names are rejected. Bare executable names search the supplied PATH (Windows defaults to the system directory); Windows batch files require an explicitly requested interpreter, never an implicit shell. Native Windows exit codes are reported without inventing POSIX signals. Result files are read as bounded binary regular files, preserving CRLF bytes, and temporary files use the native temp directory.
+
+POSIX-specific FIFO/signal tests run on Unix; `/proc`, `setsid` and parent-death-signal checks run only on Linux, where those features exist. The shared child-process tests run on every platform, including Windows, and cover spaces/quotes/Unicode argv, environment replacement, null stdin, concurrent bounded stdout/stderr, deadlines, descendant cleanup, PATH lookup and temporary-file lifecycle. GraphQL conformance vectors remain explicitly unsupported as before; their skip count is printed by conformance.
